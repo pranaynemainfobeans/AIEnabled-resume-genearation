@@ -1,0 +1,1 @@
+export type AppRoute = 'resume' | 'aiResumeFlow' | 'score';

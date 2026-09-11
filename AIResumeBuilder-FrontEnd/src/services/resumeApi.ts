@@ -24,6 +24,53 @@ export type ResumeScoreResult = {
   };
 };
 
+export type TailoredResumeResponse = {
+  initialMatchScore: number;
+  projectedAtsScore: number;
+  missingKeywordsFound: string[];
+  tailoredResume: {
+    name: string;
+    jobTitle: string;
+    contact: { email: string; phone: string; city: string; linkedin: string };
+    summary: string;
+    skills: string[];
+    experience: Array<{
+      role: string;
+      company: string;
+      duration: string;
+      location: string;
+      bulletPoints: string[];
+    }>;
+    education: string[];
+    certifications: string[];
+  };
+};
+
+export async function tailorResume(
+  file: ResumeScoreFile,
+  jobDescription: string
+): Promise<TailoredResumeResponse> {
+  const formData = new FormData();
+  formData.append('resume', {
+    uri: file.uri,
+    name: file.name,
+    type: file.type || 'application/pdf',
+  } as unknown as Blob);
+  formData.append('jobDescription', jobDescription);
+
+  const response = await fetch(`${API_BASE_URL}/tailor-resume`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  const data = await response.json();
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || 'Failed to generate tailored resume.');
+  }
+
+  return data.data;
+}
+
 async function parseResponse<T>(response: Response): Promise<T> {
   const data = (await response.json()) as T & ApiErrorResponse;
   if (!response.ok) {

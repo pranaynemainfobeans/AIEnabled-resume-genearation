@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const pdfParse = require("pdf-parse");
+const { jsonrepair } = require("jsonrepair");
 
 const app = express();
 
@@ -13,7 +14,7 @@ app.use(express.json({ limit: "10mb" }));
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10 MB
+    fileSize: 10 * 1024 * 1024, // 10 MB limit
   },
 });
 
@@ -21,216 +22,181 @@ app.get("/", (req, res) => {
   res.send("AI Resume Builder Backend Running");
 });
 
-//To customize the resume based on the job description and candidate's experience
-app.post("/customize-resume", async (req, res) => {
-  try {
-    const { resumeText, jobDescription } = req.body;
-
-    if (!resumeText || !jobDescription) {
-      return res.status(400).json({ error: "Missing inputs" });
-    }
-
-    const openRouterResponse = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "openrouter/free",
-          messages: [
-            {
-              role: "system",
-              content: `
-                  You are an expert resume optimization system.
-
-                  You ONLY output clean, professional resume content.
-
-                  Rules:
-                  - Never introduce your response.
-                  - Never say "Here is..." or "Sure..."
-                  - Do not provide explanations.
-                  - Do not use markdown.
-                  - Do not invent experience, technologies, achievements, metrics, certifications, or responsibilities.
-                  - Only use information provided by the candidate.
-                  - Use ATS-friendly terminology where appropriate.
-                  - Preserve factual accuracy.
-                          `.trim(),
-            },
-            {
-              role: "user",
-              content: `
-                  TARGET JOB DESCRIPTION:
-
-                  ${jobDescription}
-
-                  CANDIDATE EXPERIENCE:
-
-                  ${resumeText}
-
-                  Rewrite the candidate experience to better match the target job description.
-
-                  Output ONLY the rewritten professional bullet points.
-          `.trim(),
-            },
-          ],
-          temperature: 0.1,
-        }),
+// Helper function to query OpenRouter and safely handle/repair JSON output
+async function callOpenRouterJSON(systemPrompt, userPrompt) {
+  const openRouterResponse = await fetch(
+    "https://openrouter.ai/api/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
       },
-    );
+      body: JSON.stringify({
+        model: "openrouter/free",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        temperature: 0.1,
+        max_tokens: 4000, // Prevents early truncation
+      }),
+    },
+  );
 
-    if (!openRouterResponse.ok) {
+  if (!openRouterResponse.ok) {
+    const errorText = await openRouterResponse.text();
+    throw new Error(
+      `OpenRouter error (${openRouterResponse.status}): ${errorText}`,
+    );
+  }
+
+  const data = await openRouterResponse.json();
+  let rawContent = data.choices?.[0]?.message?.content?.trim() || "";
+
+  // Strip Markdown code blocks
+  rawContent = rawContent
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  // Try direct parsing first, fallback to repairing truncated JSON
+  try {
+    return JSON.parse(rawContent);
+  } catch (initialParseError) {
+    console.warn("Raw JSON parsing failed, attempting jsonrepair fallback...");
+    try {
+      const repairedJSON = jsonrepair(rawContent);
+      return JSON.parse(repairedJSON);
+    } catch (repairError) {
+      console.error("JSON Repair also failed. Raw string was:\n", rawContent);
       throw new Error(
-        `OpenRouter server responded with status ${openRouterResponse.status}`,
+        "AI returned truncated or malformed JSON. Please try again.",
       );
     }
-
-    const data = await openRouterResponse.json();
-    let rawAIResponse = data.choices[0].message.content.trim();
-
-    // FAILSAFE CLEANUP: Strip away common conversational patterns if the LLM slips up
-    rawAIResponse = rawAIResponse
-      .replace(
-        /^(here is|here's|sure, here is|here are the|optimized description:|enhanced description:)[^\n]*\n*/gi,
-        "",
-      ) // Removes introduction lines
-      .replace(/\*\*/g, "") // Removes any leftover markdown bold asterisks
-      .trim();
-
-    res.json({
-      success: true,
-      enhancedText: rawAIResponse,
-    });
-  } catch (error) {
-    console.error("Backend Error:", error);
-    res.status(500).json({
-      success: false,
-      error: "AI processing failed",
-    });
   }
-});
+}
 
-// ... (keep your existing setup and /customize-resume route)
-
-// To optimize the professional summary based on the job description
-app.post("/optimize-summary", async (req, res) => {
+// 1. MATCH & TAILOR ROUTE
+app.post("/tailor-resume", upload.single("resume"), async (req, res) => {
   try {
-    const { resumeText, jobDescription } = req.body;
+    const { jobDescription } = req.body;
 
-    if (!resumeText || !jobDescription) {
-      return res.status(400).json({ error: "Missing inputs" });
-    }
-
-    const prompt = `
-      You are an expert system that ONLY outputs raw, clean resume content. You never chat or introduce your work.
-
-      TASK:
-      Optimize the candidate's PROFESSIONAL SUMMARY to match the provided JOB DESCRIPTION. 
-      Make it compelling, professional, and dense with ATS-friendly keywords. Keep it to 3-4 sentences max.
-
-      CRITICAL RULES:
-      - Do NOT include any introductory or concluding text (e.g., do NOT say "Here is your summary").
-      - Do NOT use markdown bolding (**).
-      - Output ONLY the clean text summary.
-      - Start directly with the first word of the optimized summary.
-
-      TARGET JOB DESCRIPTION:
-      ${jobDescription}
-
-      CANDIDATE'S CURRENT SUMMARY:
-      ${resumeText}
-      `;
-
-    const openRouterResponse = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "openrouter/free",
-          messages: [
-            {
-              role: "system",
-              content: `
-              You are an expert system that ONLY outputs raw, clean resume content. You never chat or introduce your work.
-          `.trim(),
-            },
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
-          temperature: 0.2,
-        }),
-      },
-    );
-
-    if (!openRouterResponse.ok) {
-      throw new Error(
-        `OpenRouter responded with status ${openRouterResponse.status}`,
-      );
-    }
-
-    const data = await openRouterResponse.json();
-    let rawAIResponse = data.choices?.[0]?.message?.content?.trim() || "";
-
-    // Clean up any rogue LLM filler text
-    rawAIResponse = rawAIResponse
-      .replace(
-        /^(here is|here's|optimized summary:|enhanced summary:)[^\n]*\n*/gi,
-        "",
-      )
-      .replace(/\*\*/g, "")
-      .trim();
-
-    res.json({
-      success: true,
-      enhancedSummary: rawAIResponse,
-    });
-  } catch (error) {
-    console.error("Backend Error:", error);
-    res
-      .status(500)
-      .json({ success: false, error: "Summary optimization failed" });
-  }
-});
-
-// To score the resume based on various categories
-app.post("/resume-score", upload.single("resume"), async (req, res) => {
-  try {
-    // Validate uploaded file
-    if (!req.file) {
+    if (!req.file || !jobDescription) {
       return res.status(400).json({
         success: false,
-        error: "Resume file is required",
+        error:
+          "Both a resume PDF and client requirements (job description) are required.",
       });
     }
 
-    console.log("Resume received:", {
-      name: req.file.originalname,
-      type: req.file.mimetype,
-      size: req.file.size,
-    });
+    if (req.file.mimetype !== "application/pdf") {
+      return res.status(400).json({
+        success: false,
+        error: "Currently only PDF files are supported.",
+      });
+    }
 
+    const pdfData = await pdfParse(req.file.buffer);
+    const resumeText = pdfData.text.trim();
+
+    if (!resumeText) {
+      return res.status(400).json({
+        success: false,
+        error: "Failed to extract text from the provided PDF.",
+      });
+    }
+
+    // Keep prompt output requirements concise to prevent exceeding token limits
+    const systemPrompt = `
+You are an expert ATS Optimization Engine.
+
+TASK:
+Compare candidate resume against Client Requirements and generate a tailored version targeting a 90+ ATS score.
+
+RULES:
+- Do NOT fabricate fake companies, degrees, or experience.
+- Keep response CONCISE to prevent payload truncation.
+- Limit professional summary to 2-3 sentences.
+- Limit bullet points per job to a maximum of 2-3 high-impact concise points.
+- Output ONLY valid JSON matching this schema:
+
+{
+  "initialMatchScore": 65,
+  "projectedAtsScore": 95,
+  "keyKeywordsAdded": ["Keyword1", "Keyword2"],
+  "tailoredResume": {
+    "name": "Candidate Full Name",
+    "jobTitle": "Target Role Title",
+    "contactInfo": {
+      "phone": "Phone",
+      "email": "Email",
+      "city": "City",
+      "linkedin": "LinkedIn"
+    },
+    "summary": "Short 2-3 sentence summary.",
+    "skills": "Comma-separated list of skills",
+    "experience": [
+      {
+        "role": "Role Title",
+        "company": "Company Name",
+        "location": "Location",
+        "duration": "Duration",
+        "description": "2-3 concise bullet points separated by newlines."
+      }
+    ],
+    "education": "Education details",
+    "awards": "Certifications or awards"
+  }
+}
+`.trim();
+
+    const userPrompt = `
+CLIENT REQUIREMENTS:
+${jobDescription}
+
+CANDIDATE RESUME:
+${resumeText}
+`.trim();
+
+    const tailoredData = await callOpenRouterJSON(systemPrompt, userPrompt);
+
+    res.json({
+      success: true,
+      data: tailoredData,
+    });
+  } catch (error) {
+    console.error("Tailor Resume Error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message || "Failed to generate tailored resume.",
+    });
+  }
+});
+
+// 2. QUICK SCORE ROUTE
+app.post("/resume-score", upload.single("resume"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: "Resume file is required.",
+      });
+    }
+
+    const { jobDescription } = req.body;
     let resumeText = "";
 
-    // Currently support PDF
     if (req.file.mimetype === "application/pdf") {
       const pdfData = await pdfParse(req.file.buffer);
-      resumeText = pdfData.text;
+      resumeText = pdfData.text.trim();
     } else {
       return res.status(400).json({
         success: false,
         error: "Currently only PDF resumes are supported.",
       });
     }
-
-    resumeText = resumeText.trim();
 
     if (!resumeText) {
       return res.status(400).json({
@@ -239,147 +205,33 @@ app.post("/resume-score", upload.single("resume"), async (req, res) => {
       });
     }
 
-    console.log("Extracted resume text length:", resumeText.length);
-
-    const openRouterResponse = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        },
-
-        body: JSON.stringify({
-          model: "openrouter/free",
-
-          messages: [
-            {
-              role: "system",
-
-              content: `
-You are an expert ATS resume evaluator and career advisor.
-
-Analyze the candidate's resume and calculate a realistic resume quality score.
-
-Evaluate ONLY the information present in the resume.
-
-Do NOT invent:
-- Experience
-- Skills
-- Achievements
-- Metrics
-- Certifications
-- Qualifications
-- Responsibilities
-
-Return ONLY valid JSON.
-Do not use markdown.
-Do not include any explanation outside the JSON.
-
-The overall score must be between 0 and 100.
-
-Evaluate these categories:
-
-1. ATS Compatibility
-2. Professional Summary
-3. Work Experience
-4. Skills
-5. Achievements and Impact
-6. Resume Structure and Clarity
-
-Use this exact JSON structure:
-
+    const systemPrompt = `
+You are an expert ATS resume evaluator.
+Return ONLY valid raw JSON matching this structure:
 {
-  "score": 0,
-  "analysis": "Short overall analysis of the resume.",
+  "score": 75,
+  "analysis": "Short summary.",
   "categoryScores": {
-    "atsCompatibility": 0,
-    "professionalSummary": 0,
-    "workExperience": 0,
-    "skills": 0,
-    "achievementsAndImpact": 0,
-    "structureAndClarity": 0
+    "atsCompatibility": 70,
+    "professionalSummary": 80,
+    "workExperience": 75,
+    "skills": 80,
+    "achievementsAndImpact": 70,
+    "structureAndClarity": 85
   },
-  "strengths": [
-    "string"
-  ],
-  "improvements": [
-    "string"
-  ],
-  "recommendations": [
-    "string"
-  ]
+  "strengths": ["Strength 1"],
+  "improvements": ["Improvement 1"],
+  "recommendations": ["Recommendation 1"]
 }
+`.trim();
 
-Scoring guidelines:
-
-90-100 = Excellent
-80-89 = Very Good
-70-79 = Good
-60-69 = Needs Improvement
-Below 60 = Significant Improvement Needed
-
-Provide 2-4 concise strengths.
-Provide 2-4 concise improvements.
-Provide 2-4 concise recommendations.
-              `.trim(),
-            },
-
-            {
-              role: "user",
-
-              content: `
-Analyze the following resume:
-
+    const userPrompt = `
+${jobDescription ? `TARGET REQUIREMENTS:\n${jobDescription}\n\n` : ""}
+RESUME TEXT:
 ${resumeText}
-              `.trim(),
-            },
-          ],
+`.trim();
 
-          temperature: 0.1,
-        }),
-      },
-    );
-
-    if (!openRouterResponse.ok) {
-      const errorText = await openRouterResponse.text();
-
-      throw new Error(
-        `OpenRouter responded with status ${openRouterResponse.status}: ${errorText}`,
-      );
-    }
-
-    const data = await openRouterResponse.json();
-
-    let rawAIResponse = data.choices?.[0]?.message?.content?.trim() || "";
-
-    // Remove markdown code fences if the model adds them
-    rawAIResponse = rawAIResponse
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/\s*```$/i, "")
-      .trim();
-
-    let scoreResult;
-
-    try {
-      scoreResult = JSON.parse(rawAIResponse);
-    } catch (parseError) {
-      console.error("Failed to parse AI score response:", rawAIResponse);
-
-      throw new Error("AI returned an invalid score response");
-    }
-
-    // Validate score
-    if (
-      typeof scoreResult.score !== "number" ||
-      scoreResult.score < 0 ||
-      scoreResult.score > 100
-    ) {
-      throw new Error("AI returned an invalid resume score");
-    }
+    const scoreResult = await callOpenRouterJSON(systemPrompt, userPrompt);
 
     res.json({
       success: true,
@@ -392,17 +244,14 @@ ${resumeText}
     });
   } catch (error) {
     console.error("Resume Score Error:", error);
-
     res.status(500).json({
       success: false,
-      error: "Resume scoring failed",
+      error: "Resume scoring failed.",
     });
   }
 });
 
-// ... (keep your app.listen)
-
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });

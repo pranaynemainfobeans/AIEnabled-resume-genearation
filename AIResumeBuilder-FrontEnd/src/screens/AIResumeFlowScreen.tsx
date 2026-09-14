@@ -29,10 +29,19 @@ export default function AIResumeFlowScreen({
   const [selectedFile, setSelectedFile] =
     useState<DocumentPickerResponse | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [tailoredData, setTailoredData] = useState<TailoredResumeData | null>(
-    null,
-  );
   const [error, setError] = useState('');
+
+  // Score & Keyword Meta State
+  const [metaData, setMetaData] = useState<{
+    initialMatchScore: number;
+    projectedAtsScore: number;
+    keyKeywordsAdded: string[];
+  } | null>(null);
+
+  // Editable Form State (Pre-filled by AI Output)
+  const [editableData, setEditableData] = useState<
+    TailoredResumeData['tailoredResume'] | null
+  >(null);
 
   const pickResume = async () => {
     try {
@@ -64,7 +73,8 @@ export default function AIResumeFlowScreen({
 
     setError('');
     setIsProcessing(true);
-    setTailoredData(null);
+    setMetaData(null);
+    setEditableData(null);
 
     try {
       const response = await tailorResume(
@@ -75,7 +85,16 @@ export default function AIResumeFlowScreen({
         },
         jobDescription,
       );
-      setTailoredData(response);
+
+      // Save meta analytics
+      setMetaData({
+        initialMatchScore: response.initialMatchScore ?? 0,
+        projectedAtsScore: response.projectedAtsScore ?? 90,
+        keyKeywordsAdded: response.keyKeywordsAdded || [],
+      });
+
+      // Hydrate editable fields with AI response
+      setEditableData(response.tailoredResume);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Automation failed.');
     } finally {
@@ -83,11 +102,37 @@ export default function AIResumeFlowScreen({
     }
   };
 
+  // Field change handlers
+  const handleContactChange = (
+    field: keyof TailoredResumeData['tailoredResume']['contactInfo'],
+    value: string,
+  ) => {
+    if (!editableData) return;
+    setEditableData({
+      ...editableData,
+      contactInfo: {
+        ...editableData.contactInfo,
+        [field]: value,
+      },
+    });
+  };
+
+  const handleExperienceChange = (
+    index: number,
+    field: string,
+    value: string,
+  ) => {
+    if (!editableData) return;
+    const updatedExp = [...editableData.experience];
+    updatedExp[index] = { ...updatedExp[index], [field]: value };
+    setEditableData({ ...editableData, experience: updatedExp });
+  };
+
   const exportPdf = async () => {
-    if (!tailoredData?.tailoredResume) return;
+    if (!editableData) return;
     try {
-      const htmlContent = generateAtsHtml(tailoredData.tailoredResume);
-      const name = tailoredData.tailoredResume.name || 'Candidate';
+      const htmlContent = generateAtsHtml(editableData);
+      const name = editableData.name || 'Candidate';
       const fileName = `${name.replace(/\s+/g, '_')}_Tailored_Resume`;
       const file = await generatePDF({
         html: htmlContent,
@@ -103,8 +148,6 @@ export default function AIResumeFlowScreen({
     }
   };
 
-  const keywordsList = tailoredData?.keyKeywordsAdded || [];
-
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container}>
@@ -115,8 +158,8 @@ export default function AIResumeFlowScreen({
         <Text style={styles.eyebrow}>AUTOMATED ATS OPTIMIZER</Text>
         <Text style={styles.title}>Tailor Resume to Requirement</Text>
         <Text style={styles.subtitle}>
-          Upload a resume, enter client requirements, and let AI generate a 90+
-          ATS optimized PDF.
+          Upload a resume, enter client requirements, review & edit the AI
+          suggestions, and export your updated PDF.
         </Text>
 
         <View style={styles.card}>
@@ -162,31 +205,31 @@ export default function AIResumeFlowScreen({
           </View>
         )}
 
-        {tailoredData && (
+        {metaData && (
           <View style={styles.resultCard}>
             <Text style={styles.resultTitle}>Optimization Impact</Text>
 
             <View style={styles.scoreRow}>
               <View style={styles.scoreBox}>
                 <Text style={styles.scoreNumber}>
-                  {tailoredData.initialMatchScore ?? 0}
+                  {metaData.initialMatchScore}
                 </Text>
                 <Text style={styles.scoreLabel}>Initial Score</Text>
               </View>
               <Text style={styles.arrow}>➔</Text>
               <View style={styles.scoreBox}>
                 <Text style={[styles.scoreNumber, { color: '#047857' }]}>
-                  {tailoredData.projectedAtsScore ?? 90}+
+                  {metaData.projectedAtsScore}+
                 </Text>
                 <Text style={styles.scoreLabel}>Target Score</Text>
               </View>
             </View>
 
-            {keywordsList.length > 0 && (
+            {metaData.keyKeywordsAdded.length > 0 && (
               <>
                 <Text style={styles.sectionLabel}>Keywords Added:</Text>
                 <View style={styles.tagContainer}>
-                  {keywordsList.map((kw, i) => (
+                  {metaData.keyKeywordsAdded.map((kw, i) => (
                     <View key={i} style={styles.tag}>
                       <Text style={styles.tagText}>+ {kw}</Text>
                     </View>
@@ -194,10 +237,150 @@ export default function AIResumeFlowScreen({
                 </View>
               </>
             )}
+          </View>
+        )}
 
+        {editableData && (
+          <View style={styles.editorContainer}>
+            <Text style={styles.editorMainTitle}>
+              Review & Edit Tailored Content
+            </Text>
+            <Text style={styles.editorSubTitle}>
+              Feel free to adjust any text below before exporting.
+            </Text>
+
+            {/* Candidate Header Details */}
+            <View style={styles.editSection}>
+              <Text style={styles.fieldLabel}>Full Name</Text>
+              <TextInput
+                style={styles.input}
+                value={editableData.name}
+                onChangeText={text =>
+                  setEditableData({ ...editableData, name: text })
+                }
+              />
+
+              <Text style={styles.fieldLabel}>Target Role Title</Text>
+              <TextInput
+                style={styles.input}
+                value={editableData.jobTitle}
+                onChangeText={text =>
+                  setEditableData({ ...editableData, jobTitle: text })
+                }
+              />
+
+              <View style={styles.rowInputs}>
+                <View style={{ flex: 1, marginRight: 6 }}>
+                  <Text style={styles.fieldLabel}>Email</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={editableData.contactInfo?.email}
+                    onChangeText={text => handleContactChange('email', text)}
+                  />
+                </View>
+                <View style={{ flex: 1, marginLeft: 6 }}>
+                  <Text style={styles.fieldLabel}>Phone</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={editableData.contactInfo?.phone}
+                    onChangeText={text => handleContactChange('phone', text)}
+                  />
+                </View>
+              </View>
+            </View>
+
+            {/* Professional Summary */}
+            <View style={styles.editSection}>
+              <Text style={styles.fieldLabel}>Professional Summary</Text>
+              <TextInput
+                style={[styles.input, styles.multilineInput]}
+                multiline
+                value={editableData.summary}
+                onChangeText={text =>
+                  setEditableData({ ...editableData, summary: text })
+                }
+              />
+            </View>
+
+            {/* Core Skills */}
+            <View style={styles.editSection}>
+              <Text style={styles.fieldLabel}>
+                Core Skills (Comma Separated)
+              </Text>
+              <TextInput
+                style={[styles.input, styles.multilineInput, { height: 70 }]}
+                multiline
+                value={
+                  typeof editableData.skills === 'string'
+                    ? editableData.skills
+                    : (editableData.skills || []).join(', ')
+                }
+                onChangeText={text =>
+                  setEditableData({ ...editableData, skills: text })
+                }
+              />
+            </View>
+
+            {/* Professional Experience */}
+            <View style={styles.editSection}>
+              <Text style={styles.sectionHeader}>Work Experience</Text>
+              {(editableData.experience || []).map((exp, index) => (
+                <View key={index} style={styles.experienceBlock}>
+                  <Text style={styles.expIndexTitle}>Role #{index + 1}</Text>
+
+                  <Text style={styles.fieldLabel}>Job Title / Role</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={exp.role}
+                    onChangeText={text =>
+                      handleExperienceChange(index, 'role', text)
+                    }
+                  />
+
+                  <Text style={styles.fieldLabel}>Company Name</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={exp.company}
+                    onChangeText={text =>
+                      handleExperienceChange(index, 'company', text)
+                    }
+                  />
+
+                  <Text style={styles.fieldLabel}>
+                    Description / Bullet Points
+                  </Text>
+                  <TextInput
+                    style={[
+                      styles.input,
+                      styles.multilineInput,
+                      { height: 110 },
+                    ]}
+                    multiline
+                    value={exp.description}
+                    onChangeText={text =>
+                      handleExperienceChange(index, 'description', text)
+                    }
+                  />
+                </View>
+              ))}
+            </View>
+
+            {/* Education */}
+            <View style={styles.editSection}>
+              <Text style={styles.fieldLabel}>Education</Text>
+              <TextInput
+                style={styles.input}
+                value={editableData.education}
+                onChangeText={text =>
+                  setEditableData({ ...editableData, education: text })
+                }
+              />
+            </View>
+
+            {/* Export PDF Button */}
             <TouchableOpacity style={styles.exportButton} onPress={exportPdf}>
               <Text style={styles.primaryButtonText}>
-                Export 90+ ATS Resume PDF
+                Generate PDF of Updated Resume
               </Text>
             </TouchableOpacity>
           </View>
@@ -243,7 +426,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 8,
     padding: 12,
-    height: 120,
+    height: 100,
     textAlignVertical: 'top',
   },
   primaryButton: {
@@ -254,7 +437,7 @@ const styles = StyleSheet.create({
     marginTop: 16,
   },
   disabledButton: { backgroundColor: '#A5B4FC' },
-  primaryButtonText: { color: '#FFF', fontWeight: '700' },
+  primaryButtonText: { color: '#FFF', fontWeight: '700', fontSize: 15 },
   errorCard: {
     backgroundColor: '#FEF2F2',
     padding: 12,
@@ -290,12 +473,7 @@ const styles = StyleSheet.create({
     color: '#065F46',
     marginBottom: 6,
   },
-  tagContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginBottom: 16,
-  },
+  tagContainer: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   tag: {
     backgroundColor: '#D1FAE5',
     paddingHorizontal: 10,
@@ -303,10 +481,62 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   tagText: { color: '#065F46', fontSize: 12, fontWeight: '600' },
+  editorContainer: { marginTop: 20 },
+  editorMainTitle: { fontSize: 20, fontWeight: '800', color: '#111827' },
+  editorSubTitle: {
+    fontSize: 13,
+    color: '#6B7280',
+    marginTop: 2,
+    marginBottom: 12,
+  },
+  editSection: {
+    backgroundColor: '#FFF',
+    borderRadius: 8,
+    padding: 14,
+    marginBottom: 12,
+  },
+  sectionHeader: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#111827',
+    marginBottom: 10,
+  },
+  fieldLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#374151',
+    marginBottom: 4,
+    marginTop: 6,
+  },
+  input: {
+    backgroundColor: '#F9FAFB',
+    borderColor: '#D1D5DB',
+    borderWidth: 1,
+    borderRadius: 6,
+    padding: 10,
+    fontSize: 14,
+    color: '#111827',
+  },
+  multilineInput: { height: 90, textAlignVertical: 'top' },
+  rowInputs: { flexDirection: 'row' },
+  experienceBlock: {
+    borderTopWidth: 1,
+    borderTopColor: '#E5E7EB',
+    pt: 10,
+    marginTop: 10,
+  },
+  expIndexTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#4F46E5',
+    marginBottom: 4,
+  },
   exportButton: {
     backgroundColor: '#059669',
-    padding: 14,
+    padding: 16,
     borderRadius: 8,
     alignItems: 'center',
+    marginTop: 10,
+    marginBottom: 40,
   },
 });
